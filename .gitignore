@@ -1,0 +1,23 @@
+__pycache__/
+*.py[cod]
+*.pyo
+
+.venv/
+venv/
+env/
+
+.env
+.env.*
+
+.vscode/
+
+*.log
+.DS_Store
+Thumbs.db
+
+# Training artifacts
+runs/
+*.pt
+*.pth
+*.ckpt
+*.jsonl
