@@ -18,7 +18,7 @@ class MazeTrainingUI:
         self.trace_items = []
 
         self.root = tk.Tk()
-        self.root.title("Maze RL Trainer")
+        self.root.title("2D Map RL Trainer")
         self.root.geometry("1100x900")
         self.root.configure(bg="#f2efe8")
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
@@ -31,7 +31,7 @@ class MazeTrainingUI:
         self.length_var = tk.StringVar(value="Episode length: -")
         self.loss_var = tk.StringVar(value="Losses: -")
         self.fps_var = tk.StringVar(value="FPS: -")
-        self.maze_info_var = tk.StringVar(value="Maze: waiting for first random 40x40 maze...")
+        self.maze_info_var = tk.StringVar(value="Map: waiting for first random 40x40 obstacle map...")
 
         self.cell_size = 16
         self.canvas_size = self.config.maze_size * self.cell_size
@@ -57,9 +57,9 @@ class MazeTrainingUI:
         header = ttk.Frame(container, style="Panel.TFrame")
         header.pack(fill="x")
 
-        ttk.Label(header, text="Maze RL Training", style="Title.TLabel").pack(anchor="w")
+        ttk.Label(header, text="2D Map RL Training", style="Title.TLabel").pack(anchor="w")
         ttk.Label(header, textvariable=self.status_var, style="Status.TLabel").pack(anchor="w", pady=(4, 12))
-        ttk.Button(header, text="Generate New Maze", command=self.request_new_maze).pack(anchor="w", pady=(0, 8))
+        ttk.Button(header, text="Generate New Map", command=self.request_new_maze).pack(anchor="w", pady=(0, 8))
 
         body = ttk.Frame(container, style="Panel.TFrame")
         body.pack(fill="both", expand=True)
@@ -102,7 +102,7 @@ class MazeTrainingUI:
         legend_card.pack(fill="x", pady=(16, 0))
         ttk.Label(
             legend_card,
-            text="Legend\nWall: dark block\nPath: light tile\nTrace: amber\nStart: blue\nGoal: green\nAgent: orange",
+            text="Legend\nObstacle: dark block\nFree space: light tile\nTrace: amber\nStart: blue\nGoal: green\nRobot: orange",
             style="Body.TLabel",
             justify="left",
         ).pack(anchor="w")
@@ -123,10 +123,10 @@ class MazeTrainingUI:
                 break
 
         try:
-            self.command_queue.put_nowait("generate_maze")
-            self.push_status("Manual maze regeneration requested...")
+            self.command_queue.put_nowait("generate_map")
+            self.push_status("Manual map regeneration requested...")
         except queue.Full:
-            self.push_status("Maze request queued. Trainer will pick it up shortly.")
+            self.push_status("Map request queued. Trainer will pick it up shortly.")
 
     def show_placeholder(self):
         self.canvas.delete("all")
@@ -141,14 +141,14 @@ class MazeTrainingUI:
         self.canvas.create_text(
             self.canvas_size / 2,
             self.canvas_size / 2 - 12,
-            text="Waiting for maze render",
+            text="Waiting for map render",
             fill="#5a4b3f",
             font=("Segoe UI Semibold", 20),
         )
         self.canvas.create_text(
             self.canvas_size / 2,
             self.canvas_size / 2 + 18,
-            text="The first random 40x40 maze will appear here.",
+            text="The first random 40x40 obstacle map will appear here.",
             fill="#7b6a58",
             font=("Segoe UI", 12),
         )
@@ -162,6 +162,16 @@ class MazeTrainingUI:
 
     def _draw_marker(self, row: int, col: int, color: str, pad: int):
         return self.canvas.create_oval(*self._cell_bounds(row, col, pad=pad), fill=color, outline="")
+
+    def _robot_bounds(self, row: int, col: int, radius: int):
+        x0 = max(0, (col - radius) * self.cell_size + 2)
+        y0 = max(0, (row - radius) * self.cell_size + 2)
+        x1 = min(self.canvas_size, (col + radius + 1) * self.cell_size - 2)
+        y1 = min(self.canvas_size, (row + radius + 1) * self.cell_size - 2)
+        return x0, y0, x1, y1
+
+    def _draw_robot(self, row: int, col: int, radius: int):
+        return self.canvas.create_oval(*self._robot_bounds(row, col, radius), fill="#f97316", outline="#9a3412", width=2)
 
     def _redraw_static_maze(self, state: Dict[str, object]):
         grid = state["grid"]
@@ -197,9 +207,10 @@ class MazeTrainingUI:
         start_x, start_y = state["start"]
         goal_x, goal_y = state["goal"]
         agent_x, agent_y = state["agent"]
+        robot_radius = int(state.get("robot_radius_cells", 1))
         self.start_item = self._draw_marker(start_x, start_y, "#3b82f6", pad=3)
         self.goal_item = self._draw_marker(goal_x, goal_y, "#16a34a", pad=3)
-        self.agent_item = self._draw_marker(agent_x, agent_y, "#f97316", pad=2)
+        self.agent_item = self._draw_robot(agent_x, agent_y, robot_radius)
 
     def draw_maze(self, state: Dict[str, object]):
         grid = state["grid"]
@@ -230,12 +241,14 @@ class MazeTrainingUI:
 
         if self.agent_item is not None:
             agent_x, agent_y = state["agent"]
-            self.canvas.coords(self.agent_item, *self._cell_bounds(agent_x, agent_y, pad=2))
+            robot_radius = int(state.get("robot_radius_cells", 1))
+            self.canvas.coords(self.agent_item, *self._robot_bounds(agent_x, agent_y, robot_radius))
 
         self.maze_info_var.set(
-            f"Maze: {state['size']}x{state['size']} random maze | visual env={state['env_index']} | "
+            f"Map: {state['size']}x{state['size']} obstacle map | "
+            f"robot radius={state.get('robot_radius_cells', 1)} cell(s) | visual env={state['env_index']} | "
             f"step={state['step_count']} | ep_return={state['episode_return']:+.3f} | "
-            f"episodes_on_this_maze={state['episodes_on_maze']}"
+            f"episodes_on_this_map={state['episodes_on_maze']}"
         )
         self.canvas.update_idletasks()
 
@@ -247,7 +260,7 @@ class MazeTrainingUI:
             f"Episode return: {summary.get('mean_episode_return', 0.0):+.4f} | "
             f"Episode success: {summary.get('episode_success_rate', 0.0):.3f} | "
             f"Done: {int(summary.get('completed_episodes', 0.0))} | "
-            f"Maze refresh: {int(summary.get('maze_refreshes', 0.0))}"
+            f"Map refresh: {int(summary.get('map_refreshes', summary.get('maze_refreshes', 0.0)))}"
         )
         self.length_var.set(f"Episode length: {summary.get('mean_episode_length', 0.0):.1f}")
         self.loss_var.set(
@@ -275,7 +288,7 @@ class MazeTrainingUI:
             if event_type == "run_started":
                 latest_status = (
                     f"Training on {payload.get('device', 'cpu')} | "
-                    f"maze {payload.get('config', {}).get('maze_size', self.config.maze_size)}x"
+                    f"map {payload.get('config', {}).get('maze_size', self.config.maze_size)}x"
                     f"{payload.get('config', {}).get('maze_size', self.config.maze_size)}"
                 )
             elif event_type == "bootstrap_started":
@@ -293,10 +306,10 @@ class MazeTrainingUI:
                 latest_status = (
                     f"Target reached at update {payload.get('update', '?')} | "
                     f"episode success {payload.get('episode_success_rate', 0.0):.3f} | "
-                    f"continuing on maze #{payload.get('target_hits', 1) + 1}"
+                    f"continuing on map #{payload.get('target_hits', 1) + 1}"
                 )
-            elif event_type == "maze_regenerated":
-                latest_status = f"New maze generated ({payload.get('source', 'manual')})."
+            elif event_type in {"maze_regenerated", "map_regenerated"}:
+                latest_status = f"New map generated ({payload.get('source', 'manual')})."
             elif event_type == "run_finished":
                 latest_status = "Training complete."
             elif event_type == "run_error":

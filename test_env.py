@@ -9,9 +9,9 @@ from agent.policy import ActorCritic
 from env_maze import MazeEnv
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Run a trained PPO maze policy.")
-    parser.add_argument("--model-path", type=str, default="maze_policy.pt")
-    parser.add_argument("--maze-size", type=int, default=40)
+    parser = argparse.ArgumentParser(description="Run a trained PPO 2D map-navigation policy.")
+    parser.add_argument("--model-path", type=str, default="map_policy.pt")
+    parser.add_argument("--maze-size", "--map-size", dest="maze_size", type=int, default=40)
     parser.add_argument("--max-steps", type=int, default=400)
     parser.add_argument("--steps", type=int, default=500)
     parser.add_argument("--render-every", type=int, default=20)
@@ -42,7 +42,7 @@ def main():
     policy = load_policy(str(model_path), args.device, env.obs_dim, env.act_dim)
 
     print(f">>> Loaded model: {model_path}")
-    print("\n=== TEST MAZE RL ===")
+    print("\n=== TEST 2D MAP RL ===")
     print("Ctrl+C to stop")
 
     obs = env.reset()

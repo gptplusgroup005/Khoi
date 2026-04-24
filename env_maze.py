@@ -5,7 +5,7 @@ from typing import Dict, List, Optional, Tuple
 import torch
 
 class MazeEnv:
-    """Vectorized maze environment for discrete-action RL."""
+    """Vectorized 2D obstacle-map environment for discrete-action RL."""
 
     def __init__(
         self,
@@ -20,8 +20,10 @@ class MazeEnv:
         self.device = device
         self.obs_dim = 15
         self.act_dim = 4
+        self.robot_radius_cells = max(1, round(size * 0.035))
 
         self.grids = torch.zeros((num_envs, size, size), dtype=torch.bool, device=device)
+        self.navigation_grids = torch.zeros((num_envs, size, size), dtype=torch.bool, device=device)
         self.distance_maps = torch.full((num_envs, size, size), size * size, dtype=torch.float32, device=device)
         self.agent_pos = torch.zeros((num_envs, 2), dtype=torch.long, device=device)
         self.start_pos = torch.zeros((num_envs, 2), dtype=torch.long, device=device)
@@ -32,47 +34,26 @@ class MazeEnv:
         self.episodes_on_maze = torch.zeros(num_envs, dtype=torch.long, device=device)
         self.trace_map = torch.zeros((num_envs, size, size), dtype=torch.float32, device=device)
 
-    def _generate_maze(self) -> torch.Tensor:
-        n = self.size
-        grid = [[False for _ in range(n)] for _ in range(n)]
+    def _inflate_obstacles(self, grid: torch.Tensor) -> torch.Tensor:
+        navigation_grid = grid.clone()
+        blocked = torch.where(~grid)
+        for x, y in zip(blocked[0].tolist(), blocked[1].tolist()):
+            x0 = max(0, x - self.robot_radius_cells)
+            x1 = min(self.size, x + self.robot_radius_cells + 1)
+            y0 = max(0, y - self.robot_radius_cells)
+            y1 = min(self.size, y + self.robot_radius_cells + 1)
+            navigation_grid[x0:x1, y0:y1] = False
+        return navigation_grid
 
-        stack = [(1, 1)]
-        grid[1][1] = True
-        dirs = [(2, 0), (-2, 0), (0, 2), (0, -2)]
-
-        while stack:
-            x, y = stack[-1]
-            neighbors = []
-            for dx, dy in dirs:
-                nx, ny = x + dx, y + dy
-                if 1 <= nx < n - 1 and 1 <= ny < n - 1 and not grid[nx][ny]:
-                    neighbors.append((nx, ny, dx, dy))
-
-            if neighbors:
-                nx, ny, dx, dy = random.choice(neighbors)
-                grid[x + dx // 2][y + dy // 2] = True
-                grid[nx][ny] = True
-                stack.append((nx, ny))
-            else:
-                stack.pop()
-
-        return torch.tensor(grid, dtype=torch.bool)
-
-    def _find_goal(self, grid: torch.Tensor, start: Tuple[int, int]) -> Tuple[int, int]:
+    def _bfs_distances(self, grid: torch.Tensor, start: Tuple[int, int]) -> Dict[Tuple[int, int], int]:
         start_x, start_y = start
         queue = deque([(start_x, start_y)])
         distances = {(start_x, start_y): 0}
-        farthest = (start_x, start_y)
-        farthest_distance = 0
         dirs = [(-1, 0), (1, 0), (0, -1), (0, 1)]
 
         while queue:
             x, y = queue.popleft()
             current_distance = distances[(x, y)]
-            if current_distance > farthest_distance:
-                farthest = (x, y)
-                farthest_distance = current_distance
-
             for dx, dy in dirs:
                 nx, ny = x + dx, y + dy
                 if not (0 <= nx < self.size and 0 <= ny < self.size):
@@ -84,7 +65,52 @@ class MazeEnv:
                 distances[(nx, ny)] = current_distance + 1
                 queue.append((nx, ny))
 
-        return farthest
+        return distances
+
+    def _generate_obstacle_map(self) -> Tuple[torch.Tensor, torch.Tensor, Tuple[int, int], Tuple[int, int]]:
+        n = self.size
+        min_path_length = max(6, int(n * 0.7))
+
+        for _ in range(200):
+            grid = torch.ones((n, n), dtype=torch.bool)
+            grid[0, :] = False
+            grid[-1, :] = False
+            grid[:, 0] = False
+            grid[:, -1] = False
+
+            obstacle_count = random.randint(max(5, n // 5), max(8, n // 3))
+            for _ in range(obstacle_count):
+                width = random.randint(max(2, n // 14), max(3, n // 5))
+                height = random.randint(max(2, n // 14), max(3, n // 5))
+                x = random.randint(1, max(1, n - height - 1))
+                y = random.randint(1, max(1, n - width - 1))
+                grid[x : x + height, y : y + width] = False
+
+            navigation_grid = self._inflate_obstacles(grid)
+            free_cells = torch.where(navigation_grid)
+            if free_cells[0].numel() < n:
+                continue
+
+            candidate_index = random.randrange(free_cells[0].numel())
+            start = (int(free_cells[0][candidate_index].item()), int(free_cells[1][candidate_index].item()))
+            distances = self._bfs_distances(navigation_grid, start)
+            if len(distances) < n:
+                continue
+
+            goal, path_length = max(distances.items(), key=lambda item: item[1])
+            if path_length >= min_path_length:
+                return grid, navigation_grid, start, goal
+
+        grid = torch.ones((n, n), dtype=torch.bool)
+        grid[0, :] = False
+        grid[-1, :] = False
+        grid[:, 0] = False
+        grid[:, -1] = False
+        navigation_grid = self._inflate_obstacles(grid)
+        return grid, navigation_grid, (1 + self.robot_radius_cells, 1 + self.robot_radius_cells), (
+            n - 2 - self.robot_radius_cells,
+            n - 2 - self.robot_radius_cells,
+        )
 
     def _compute_distance_map(self, grid: torch.Tensor, goal: Tuple[int, int]) -> torch.Tensor:
         goal_x, goal_y = goal
@@ -116,14 +142,13 @@ class MazeEnv:
         self.trace_map[idx, start_x, start_y] = 1.0
 
     def _generate_new_maze(self, idx: int):
-        grid = self._generate_maze()
-        start = (1, 1)
-        goal = self._find_goal(grid, start)
+        grid, navigation_grid, start, goal = self._generate_obstacle_map()
 
-        self.grids[idx] = grid
+        self.grids[idx] = grid.to(self.device)
+        self.navigation_grids[idx] = navigation_grid.to(self.device)
         self.start_pos[idx] = torch.tensor(start, dtype=torch.long, device=self.device)
         self.goal_pos[idx] = torch.tensor(goal, dtype=torch.long, device=self.device)
-        self.distance_maps[idx] = self._compute_distance_map(grid, goal)
+        self.distance_maps[idx] = self._compute_distance_map(navigation_grid, goal)
         self.episodes_on_maze[idx] = 0
 
     def _reset_episode(self, idx: int, regenerate_maze: bool):
@@ -148,6 +173,9 @@ class MazeEnv:
     def regenerate_maze(self, env_ids: Optional[torch.Tensor] = None):
         return self.reset(env_ids=env_ids, regenerate_maze=True)
 
+    def regenerate_map(self, env_ids: Optional[torch.Tensor] = None):
+        return self.regenerate_maze(env_ids=env_ids)
+
     def step(self, action: torch.Tensor):
         action = action.view(-1).long()
         action = torch.clamp(action, 0, self.act_dim - 1)
@@ -165,7 +193,7 @@ class MazeEnv:
         proposed[:, 1] = torch.clamp(proposed[:, 1], 0, self.size - 1)
 
         env_indices = torch.arange(self.num_envs, device=self.device)
-        free_mask = self.grids[env_indices, proposed[:, 0], proposed[:, 1]]
+        free_mask = self.navigation_grids[env_indices, proposed[:, 0], proposed[:, 1]]
         hit_wall = ~free_mask
 
         self.agent_pos[free_mask] = proposed[free_mask]
@@ -211,7 +239,9 @@ class MazeEnv:
             "episode_success": completed_success,
             "done_count": done.float().sum().unsqueeze(0),
             "maze_refresh": maze_refresh,
+            "map_refresh": maze_refresh,
             "episodes_on_maze": self.episodes_on_maze.float(),
+            "episodes_on_map": self.episodes_on_maze.float(),
         }
 
         return self._get_obs(), reward, done.float(), info
@@ -238,6 +268,8 @@ class MazeEnv:
             "episode_return": float(self.episode_return[env_index].item()),
             "episode_length": int(self.episode_length[env_index].item()),
             "episodes_on_maze": int(self.episodes_on_maze[env_index].item()),
+            "episodes_on_map": int(self.episodes_on_maze[env_index].item()),
+            "robot_radius_cells": self.robot_radius_cells,
         }
 
     def render_ascii(self, env_index: int = 0) -> str:
@@ -280,10 +312,10 @@ class MazeEnv:
         left = torch.clamp(self.agent_pos[:, 1] - 1, 0, self.size - 1)
         right = torch.clamp(self.agent_pos[:, 1] + 1, 0, self.size - 1)
 
-        wall_up = (~self.grids[env_indices, up, self.agent_pos[:, 1]]).float()
-        wall_down = (~self.grids[env_indices, down, self.agent_pos[:, 1]]).float()
-        wall_left = (~self.grids[env_indices, self.agent_pos[:, 0], left]).float()
-        wall_right = (~self.grids[env_indices, self.agent_pos[:, 0], right]).float()
+        wall_up = (~self.navigation_grids[env_indices, up, self.agent_pos[:, 1]]).float()
+        wall_down = (~self.navigation_grids[env_indices, down, self.agent_pos[:, 1]]).float()
+        wall_left = (~self.navigation_grids[env_indices, self.agent_pos[:, 0], left]).float()
+        wall_right = (~self.navigation_grids[env_indices, self.agent_pos[:, 0], right]).float()
 
         normalizer = max(1, self.size)
         current_distance = self.distance_maps[env_indices, self.agent_pos[:, 0], self.agent_pos[:, 1]] / normalizer

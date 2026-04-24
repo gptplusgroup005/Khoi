@@ -2,6 +2,7 @@ import argparse
 import itertools
 import json
 import queue
+import random
 import threading
 import time
 from dataclasses import asdict, dataclass
@@ -27,7 +28,7 @@ class TrainConfig:
     learning_rate: float = 3e-4
     log_every: int = 64
     checkpoint_every: int = 25
-    checkpoint_path: str = "maze_policy.pt"
+    checkpoint_path: str = "map_policy.pt"
     metrics_path: str = "runs/train_metrics.jsonl"
     visual_env_index: int = 0
     visual_log_every: int = 32
@@ -65,16 +66,16 @@ class JsonlEventWriter:
             self.handle = None
 
 def parse_args() -> TrainConfig:
-    parser = argparse.ArgumentParser(description="Train RL for maze navigation with live UI.")
+    parser = argparse.ArgumentParser(description="Train RL for 2D obstacle-map navigation with live UI.")
     parser.add_argument("--num-envs", type=int, default=32)
-    parser.add_argument("--maze-size", type=int, default=40)
+    parser.add_argument("--maze-size", "--map-size", dest="maze_size", type=int, default=40)
     parser.add_argument("--max-steps", type=int, default=1200)
     parser.add_argument("--num-steps", type=int, default=512)
     parser.add_argument("--updates", type=int, default=0, help="Number of PPO updates. Use 0 to keep training until stopped.")
     parser.add_argument("--learning-rate", type=float, default=3e-4)
     parser.add_argument("--log-every", type=int, default=64)
     parser.add_argument("--checkpoint-every", type=int, default=25)
-    parser.add_argument("--checkpoint-path", type=str, default="maze_policy.pt")
+    parser.add_argument("--checkpoint-path", type=str, default="map_policy.pt")
     parser.add_argument("--metrics-path", type=str, default="runs/train_metrics.jsonl")
     parser.add_argument("--visual-env-index", type=int, default=0)
     parser.add_argument("--visual-log-every", type=int, default=32)
@@ -85,6 +86,22 @@ def parse_args() -> TrainConfig:
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--headless", action="store_true", help="Disable the Tkinter UI and train in terminal only.")
     args = parser.parse_args()
+    if args.num_envs <= 0:
+        parser.error("--num-envs must be greater than 0")
+    if args.maze_size < 8:
+        parser.error("--map-size/--maze-size must be at least 8")
+    if args.max_steps <= 0:
+        parser.error("--max-steps must be greater than 0")
+    if args.num_steps <= 0:
+        parser.error("--num-steps must be greater than 0")
+    if args.log_every <= 0:
+        parser.error("--log-every must be greater than 0")
+    if args.visual_log_every <= 0:
+        parser.error("--visual-log-every must be greater than 0")
+    if args.checkpoint_every <= 0:
+        parser.error("--checkpoint-every must be greater than 0")
+    if not 0 <= args.visual_env_index < args.num_envs:
+        parser.error("--visual-env-index must be between 0 and --num-envs - 1")
     return TrainConfig(
         num_envs=args.num_envs,
         maze_size=args.maze_size,
@@ -107,6 +124,7 @@ def parse_args() -> TrainConfig:
     )
 
 def set_seed(seed: int):
+    random.seed(seed)
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
@@ -227,9 +245,9 @@ def train(
     )
     emit_event("visual_state", env.get_visual_state(env_index=config.visual_env_index), writer, ui_callback)
 
-    print(f"=== START MAZE TRAINING ON {config.device.upper()} ===")
+    print(f"=== START 2D MAP TRAINING ON {config.device.upper()} ===")
     print(
-        f"envs={config.num_envs} | maze={config.maze_size}x{config.maze_size} | "
+        f"envs={config.num_envs} | map={config.maze_size}x{config.maze_size} | "
         f"rollout_steps={config.num_steps} | "
         f"updates={'continuous' if config.updates <= 0 else config.updates}"
     )
@@ -280,8 +298,8 @@ def train(
                     except queue.Empty:
                         break
 
-                    if command == "generate_maze":
-                        obs = env.regenerate_maze()
+                    if command in {"generate_maze", "generate_map"}:
+                        obs = env.regenerate_map()
                         maze_refreshes += 1.0
                         emit_event(
                             "visual_state",
@@ -290,7 +308,7 @@ def train(
                             ui_callback,
                         )
                         emit_event(
-                            "maze_regenerated",
+                            "map_regenerated",
                             {"source": "manual", "update": update, "step": step},
                             writer,
                             ui_callback,
@@ -308,7 +326,7 @@ def train(
                 successful_episodes += info["episode_success"].sum().item()
                 episode_return_sum += info["episode_return"].sum().item()
                 episode_length_sum += info["episode_length"].sum().item()
-                maze_refreshes += info["maze_refresh"].sum().item()
+                maze_refreshes += info.get("map_refresh", info["maze_refresh"]).sum().item()
 
                 if step % config.log_every == 0 or step == config.num_steps - 1:
                     print(
@@ -357,6 +375,7 @@ def train(
                 "mean_episode_length": mean_episode_length,
                 "wall_hit_rate": wall_hit_rate,
                 "maze_refreshes": maze_refreshes,
+                "map_refreshes": maze_refreshes,
                 "fps": fps,
                 **ppo_info,
             }
@@ -367,7 +386,7 @@ def train(
                 f"ep_success={episode_success_rate:.3f} | ep_done={int(completed_episodes)} | "
                 f"ep_rew={mean_episode_return:+.4f} | "
                 f"ep_len={mean_episode_length:.1f} | wall={wall_hit_rate:.4f} | "
-                f"maze_refresh={int(maze_refreshes)} | fps={fps:.1f}"
+                f"map_refresh={int(maze_refreshes)} | fps={fps:.1f}"
             )
             print(
                 f"ppo: pi_loss={ppo_info['policy_loss']:.4f} | v_loss={ppo_info['value_loss']:.4f} | "
@@ -407,7 +426,7 @@ def train(
                     f"=== TARGET REACHED: episode_success={episode_success_rate:.3f} "
                     f"at update {update:04d} ==="
                 )
-                obs = env.regenerate_maze()
+                obs = env.regenerate_map()
                 emit_event(
                     "visual_state",
                     env.get_visual_state(env_index=config.visual_env_index),
@@ -415,12 +434,12 @@ def train(
                     ui_callback,
                 )
                 emit_event(
-                    "maze_regenerated",
+                    "map_regenerated",
                     {"source": "auto_target", "update": update, "target_hits": target_hits},
                     writer,
                     ui_callback,
                 )
-                print("=== AUTO-GENERATED NEW MAZE; CONTINUING TRAINING ===")
+                print("=== AUTO-GENERATED NEW MAP; CONTINUING TRAINING ===")
 
         else:
             emit_event(
