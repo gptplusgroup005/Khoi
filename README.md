@@ -20,6 +20,8 @@ Default training with live UI:
 python train.py
 ```
 
+By default the trainer keeps running after it reaches the target success rate. It saves a checkpoint, generates a fresh maze, and continues improving the policy. Use `--updates N` if you want a finite run.
+
 Headless training:
 
 ```bash
@@ -30,7 +32,9 @@ python train.py --headless
 
 - The maze is kept stable during training.
 - A new maze is generated only when you press the `Generate New Maze` button in the UI.
+- After the target success rate is reached, a new maze is generated automatically and training continues.
 - The goal is always reachable from the start.
+- The observation includes shortest-path distance hints computed from the current maze, so the same policy can adapt immediately when a new maze is generated.
 - The UI shows an amber trace line of cells the agent has visited.
 
 ## Evaluation

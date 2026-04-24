@@ -8,7 +8,6 @@ import torch
 from agent.policy import ActorCritic
 from env_maze import MazeEnv
 
-
 def parse_args():
     parser = argparse.ArgumentParser(description="Run a trained PPO maze policy.")
     parser.add_argument("--model-path", type=str, default="maze_policy.pt")
@@ -19,7 +18,6 @@ def parse_args():
     parser.add_argument("--sleep", type=float, default=0.1)
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     return parser.parse_args()
-
 
 def load_policy(model_path: str, device: str, obs_dim: int, act_dim: int) -> ActorCritic:
     policy = ActorCritic(obs_dim, act_dim).to(device)
@@ -32,7 +30,6 @@ def load_policy(model_path: str, device: str, obs_dim: int, act_dim: int) -> Act
 
     policy.eval()
     return policy
-
 
 def main():
     args = parse_args()
@@ -53,7 +50,7 @@ def main():
     try:
         for step_idx in range(args.steps):
             with torch.no_grad():
-                action, _, _, _ = policy.act(obs)
+                action, _, _, _ = policy.act(obs, deterministic=True)
 
             obs, reward, done, info = env.step(action)
 
@@ -70,7 +67,6 @@ def main():
 
     except KeyboardInterrupt:
         print("\n>>> Stop test")
-
 
 if __name__ == "__main__":
     main()

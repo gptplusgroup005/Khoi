@@ -3,7 +3,6 @@ import tkinter as tk
 from tkinter import ttk
 from typing import Dict, Optional, Tuple
 
-
 class MazeTrainingUI:
     def __init__(self, config, event_queue: "queue.Queue[Dict[str, object]]", command_queue: "queue.Queue[str]", stop_event):
         self.config = config
@@ -58,7 +57,7 @@ class MazeTrainingUI:
         header = ttk.Frame(container, style="Panel.TFrame")
         header.pack(fill="x")
 
-        ttk.Label(header, text="Maze PPO Training", style="Title.TLabel").pack(anchor="w")
+        ttk.Label(header, text="Maze RL Training", style="Title.TLabel").pack(anchor="w")
         ttk.Label(header, textvariable=self.status_var, style="Status.TLabel").pack(anchor="w", pady=(4, 12))
         ttk.Button(header, text="Generate New Maze", command=self.request_new_maze).pack(anchor="w", pady=(0, 8))
 
@@ -117,11 +116,17 @@ class MazeTrainingUI:
         self.status_var.set(text)
 
     def request_new_maze(self):
+        while True:
+            try:
+                self.command_queue.get_nowait()
+            except queue.Empty:
+                break
+
         try:
             self.command_queue.put_nowait("generate_maze")
             self.push_status("Manual maze regeneration requested...")
         except queue.Full:
-            self.push_status("Maze request queue is busy. Try again in a moment.")
+            self.push_status("Maze request queued. Trainer will pick it up shortly.")
 
     def show_placeholder(self):
         self.canvas.delete("all")
@@ -240,6 +245,7 @@ class MazeTrainingUI:
         self.success_var.set(f"Success rate: {summary.get('success_rate', 0.0):.4f} | Wall hit rate: {summary.get('wall_hit_rate', 0.0):.4f}")
         self.episode_var.set(
             f"Episode return: {summary.get('mean_episode_return', 0.0):+.4f} | "
+            f"Episode success: {summary.get('episode_success_rate', 0.0):.3f} | "
             f"Done: {int(summary.get('completed_episodes', 0.0))} | "
             f"Maze refresh: {int(summary.get('maze_refreshes', 0.0))}"
         )
@@ -272,6 +278,10 @@ class MazeTrainingUI:
                     f"maze {payload.get('config', {}).get('maze_size', self.config.maze_size)}x"
                     f"{payload.get('config', {}).get('maze_size', self.config.maze_size)}"
                 )
+            elif event_type == "bootstrap_started":
+                latest_status = "Bootstrapping policy..."
+            elif event_type == "bootstrap_finished":
+                latest_status = f"Bootstrap accuracy {payload.get('bootstrap_accuracy', 0.0):.3f}"
             elif event_type == "visual_state":
                 latest_visual = payload
             elif event_type == "update_summary":
@@ -279,6 +289,14 @@ class MazeTrainingUI:
                 latest_status = "Training in progress..."
             elif event_type == "checkpoint_saved":
                 latest_status = f"Checkpoint saved at update {payload.get('update', '?')}"
+            elif event_type == "target_reached":
+                latest_status = (
+                    f"Target reached at update {payload.get('update', '?')} | "
+                    f"episode success {payload.get('episode_success_rate', 0.0):.3f} | "
+                    f"continuing on maze #{payload.get('target_hits', 1) + 1}"
+                )
+            elif event_type == "maze_regenerated":
+                latest_status = f"New maze generated ({payload.get('source', 'manual')})."
             elif event_type == "run_finished":
                 latest_status = "Training complete."
             elif event_type == "run_error":
