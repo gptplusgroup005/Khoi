@@ -3,6 +3,7 @@ from collections import deque
 from typing import Dict, List, Optional, Tuple
 
 import torch
+import torch.nn.functional as F
 
 class MazeEnv:
     """Vectorized 2D obstacle-map environment for discrete-action RL."""
@@ -21,6 +22,8 @@ class MazeEnv:
         self.obs_dim = 15
         self.act_dim = 4
         self.robot_radius_cells = max(1, round(size * 0.035))
+        self.position_scale = 1.0 / max(1, size - 1)
+        self.distance_scale = 1.0 / max(1, size)
 
         self.grids = torch.zeros((num_envs, size, size), dtype=torch.bool, device=device)
         self.navigation_grids = torch.zeros((num_envs, size, size), dtype=torch.bool, device=device)
@@ -33,17 +36,19 @@ class MazeEnv:
         self.episode_length = torch.zeros(num_envs, dtype=torch.long, device=device)
         self.episodes_on_maze = torch.zeros(num_envs, dtype=torch.long, device=device)
         self.trace_map = torch.zeros((num_envs, size, size), dtype=torch.float32, device=device)
+        self.env_indices = torch.arange(num_envs, device=device)
+        self.action_deltas = torch.tensor(
+            [[-1, 0], [1, 0], [0, -1], [0, 1]],
+            dtype=torch.long,
+            device=device,
+        )
 
     def _inflate_obstacles(self, grid: torch.Tensor) -> torch.Tensor:
-        navigation_grid = grid.clone()
-        blocked = torch.where(~grid)
-        for x, y in zip(blocked[0].tolist(), blocked[1].tolist()):
-            x0 = max(0, x - self.robot_radius_cells)
-            x1 = min(self.size, x + self.robot_radius_cells + 1)
-            y0 = max(0, y - self.robot_radius_cells)
-            y1 = min(self.size, y + self.robot_radius_cells + 1)
-            navigation_grid[x0:x1, y0:y1] = False
-        return navigation_grid
+        radius = self.robot_radius_cells
+        kernel_size = radius * 2 + 1
+        blocked = (~grid).float().view(1, 1, self.size, self.size)
+        inflated = F.max_pool2d(blocked, kernel_size=kernel_size, stride=1, padding=radius)
+        return inflated.view(self.size, self.size) <= 0.0
 
     def _bfs_distances(self, grid: torch.Tensor, start: Tuple[int, int]) -> Dict[Tuple[int, int], int]:
         start_x, start_y = start
@@ -163,7 +168,7 @@ class MazeEnv:
 
     def reset(self, env_ids: Optional[torch.Tensor] = None, regenerate_maze: bool = True):
         if env_ids is None:
-            env_ids = torch.arange(self.num_envs, device=self.device)
+            env_ids = self.env_indices
 
         for idx in env_ids.tolist():
             self._reset_episode(idx, regenerate_maze=regenerate_maze)
@@ -179,21 +184,14 @@ class MazeEnv:
     def step(self, action: torch.Tensor):
         action = action.view(-1).long()
         action = torch.clamp(action, 0, self.act_dim - 1)
-
-        deltas = torch.tensor(
-            [[-1, 0], [1, 0], [0, -1], [0, 1]],
-            dtype=torch.long,
-            device=self.device,
-        )
-        move = deltas[action]
+        move = self.action_deltas[action]
 
         prev_pos = self.agent_pos.clone()
         proposed = prev_pos + move
         proposed[:, 0] = torch.clamp(proposed[:, 0], 0, self.size - 1)
         proposed[:, 1] = torch.clamp(proposed[:, 1], 0, self.size - 1)
 
-        env_indices = torch.arange(self.num_envs, device=self.device)
-        free_mask = self.navigation_grids[env_indices, proposed[:, 0], proposed[:, 1]]
+        free_mask = self.navigation_grids[self.env_indices, proposed[:, 0], proposed[:, 1]]
         hit_wall = ~free_mask
 
         self.agent_pos[free_mask] = proposed[free_mask]
@@ -202,14 +200,14 @@ class MazeEnv:
 
         current_x = self.agent_pos[:, 0]
         current_y = self.agent_pos[:, 1]
-        self.trace_map[env_indices, current_x, current_y] += 1.0
+        self.trace_map[self.env_indices, current_x, current_y] += 1.0
 
         reached_goal = (self.agent_pos == self.goal_pos).all(dim=1)
         timeout = self.step_count >= self.max_steps
         done = reached_goal | timeout
 
-        prev_dist = self.distance_maps[env_indices, prev_pos[:, 0], prev_pos[:, 1]]
-        new_dist = self.distance_maps[env_indices, self.agent_pos[:, 0], self.agent_pos[:, 1]]
+        prev_dist = self.distance_maps[self.env_indices, prev_pos[:, 0], prev_pos[:, 1]]
+        new_dist = self.distance_maps[self.env_indices, self.agent_pos[:, 0], self.agent_pos[:, 1]]
         progress = (prev_dist - new_dist) * 0.05
 
         reward = -0.005 + progress
@@ -221,7 +219,7 @@ class MazeEnv:
         completed_return = torch.zeros_like(self.episode_return)
         completed_length = torch.zeros_like(self.episode_length)
         completed_success = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
-        maze_refresh = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
+        maze_refresh = torch.zeros_like(self.episode_return)
 
         for idx in torch.where(done)[0].tolist():
             completed_return[idx] = self.episode_return[idx]
@@ -299,48 +297,34 @@ class MazeEnv:
         return "\n".join(rows)
 
     def _get_obs(self):
-        env_indices = torch.arange(self.num_envs, device=self.device)
-        x = self.agent_pos[:, 0].float() / (self.size - 1)
-        y = self.agent_pos[:, 1].float() / (self.size - 1)
-        gx = self.goal_pos[:, 0].float() / (self.size - 1)
-        gy = self.goal_pos[:, 1].float() / (self.size - 1)
-        dx = (self.goal_pos[:, 0].float() - self.agent_pos[:, 0].float()) / (self.size - 1)
-        dy = (self.goal_pos[:, 1].float() - self.agent_pos[:, 1].float()) / (self.size - 1)
+        agent_x = self.agent_pos[:, 0]
+        agent_y = self.agent_pos[:, 1]
+        goal_x = self.goal_pos[:, 0]
+        goal_y = self.goal_pos[:, 1]
+        agent_x_float = agent_x.float()
+        agent_y_float = agent_y.float()
+        goal_x_float = goal_x.float()
+        goal_y_float = goal_y.float()
 
-        up = torch.clamp(self.agent_pos[:, 0] - 1, 0, self.size - 1)
-        down = torch.clamp(self.agent_pos[:, 0] + 1, 0, self.size - 1)
-        left = torch.clamp(self.agent_pos[:, 1] - 1, 0, self.size - 1)
-        right = torch.clamp(self.agent_pos[:, 1] + 1, 0, self.size - 1)
+        up = torch.clamp(agent_x - 1, 0, self.size - 1)
+        down = torch.clamp(agent_x + 1, 0, self.size - 1)
+        left = torch.clamp(agent_y - 1, 0, self.size - 1)
+        right = torch.clamp(agent_y + 1, 0, self.size - 1)
 
-        wall_up = (~self.navigation_grids[env_indices, up, self.agent_pos[:, 1]]).float()
-        wall_down = (~self.navigation_grids[env_indices, down, self.agent_pos[:, 1]]).float()
-        wall_left = (~self.navigation_grids[env_indices, self.agent_pos[:, 0], left]).float()
-        wall_right = (~self.navigation_grids[env_indices, self.agent_pos[:, 0], right]).float()
-
-        normalizer = max(1, self.size)
-        current_distance = self.distance_maps[env_indices, self.agent_pos[:, 0], self.agent_pos[:, 1]] / normalizer
-        up_distance = self.distance_maps[env_indices, up, self.agent_pos[:, 1]] / normalizer
-        down_distance = self.distance_maps[env_indices, down, self.agent_pos[:, 1]] / normalizer
-        left_distance = self.distance_maps[env_indices, self.agent_pos[:, 0], left] / normalizer
-        right_distance = self.distance_maps[env_indices, self.agent_pos[:, 0], right] / normalizer
-
-        return torch.stack(
-            [
-                x,
-                y,
-                gx,
-                gy,
-                dx,
-                dy,
-                wall_up,
-                wall_down,
-                wall_left,
-                wall_right,
-                current_distance,
-                up_distance,
-                down_distance,
-                left_distance,
-                right_distance,
-            ],
-            dim=-1,
-        )
+        obs = torch.empty((self.num_envs, self.obs_dim), dtype=torch.float32, device=self.device)
+        obs[:, 0] = agent_x_float * self.position_scale
+        obs[:, 1] = agent_y_float * self.position_scale
+        obs[:, 2] = goal_x_float * self.position_scale
+        obs[:, 3] = goal_y_float * self.position_scale
+        obs[:, 4] = (goal_x_float - agent_x_float) * self.position_scale
+        obs[:, 5] = (goal_y_float - agent_y_float) * self.position_scale
+        obs[:, 6] = (~self.navigation_grids[self.env_indices, up, agent_y]).float()
+        obs[:, 7] = (~self.navigation_grids[self.env_indices, down, agent_y]).float()
+        obs[:, 8] = (~self.navigation_grids[self.env_indices, agent_x, left]).float()
+        obs[:, 9] = (~self.navigation_grids[self.env_indices, agent_x, right]).float()
+        obs[:, 10] = self.distance_maps[self.env_indices, agent_x, agent_y] * self.distance_scale
+        obs[:, 11] = self.distance_maps[self.env_indices, up, agent_y] * self.distance_scale
+        obs[:, 12] = self.distance_maps[self.env_indices, down, agent_y] * self.distance_scale
+        obs[:, 13] = self.distance_maps[self.env_indices, agent_x, left] * self.distance_scale
+        obs[:, 14] = self.distance_maps[self.env_indices, agent_x, right] * self.distance_scale
+        return obs

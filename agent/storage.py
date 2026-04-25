@@ -37,18 +37,17 @@ class RolloutStorage:
     def compute_returns(self, last_value, gamma=0.99, gae_lambda=0.95):
 
         gae = torch.zeros(self.num_envs, device=self.device)
-        temp_values = torch.cat([self.values[:self.step], last_value.unsqueeze(0)], dim=0)
         
         for t in reversed(range(self.step)):
             next_non_terminal = 1.0 - self.dones[t]
-            delta = self.rewards[t] + gamma * temp_values[t + 1] * next_non_terminal - temp_values[t]
+            next_value = last_value if t == self.step - 1 else self.values[t + 1]
+            delta = self.rewards[t] + gamma * next_value * next_non_terminal - self.values[t]
             gae = delta + gamma * gae_lambda * next_non_terminal * gae
             self.advantages[t] = gae
             self.returns[t] = self.advantages[t] + self.values[t]
 
         adv = self.advantages[:self.step]
-        self.advantages[:self.step] = (adv - adv.mean()) / (adv.std() + 1e-8)
-        self.advantages[:self.step] = torch.clamp(self.advantages[:self.step], -5.0, 5.0)
+        adv.sub_(adv.mean()).div_(adv.std() + 1e-8).clamp_(-5.0, 5.0)
 
     def mini_batches(self, num_mini_batches: int):
         batch_size = self.step * self.num_envs

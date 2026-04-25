@@ -28,13 +28,13 @@ class PpoAlgorithm:
         device = next(self.policy.parameters()).device
         for _ in range(self.num_learning_epochs):
             for obs, actions, old_logp, returns, advantages, old_values in storage.mini_batches(self.num_mini_batches):
-                
-                obs = obs.to(device)
-                actions = actions.to(device)
-                old_logp = old_logp.to(device)
-                returns = returns.to(device)
-                advantages = advantages.to(device)
-                old_values = old_values.to(device)
+                if obs.device != device:
+                    obs = obs.to(device)
+                    actions = actions.to(device)
+                    old_logp = old_logp.to(device)
+                    returns = returns.to(device)
+                    advantages = advantages.to(device)
+                    old_values = old_values.to(device)
                 logp, values, entropy = self.policy.evaluate(obs, actions)
 
                 ratio = torch.exp(logp - old_logp)
@@ -48,7 +48,8 @@ class PpoAlgorithm:
                 else:
                     value_loss = (returns - values).pow(2).mean()
 
-                loss = policy_loss + self.value_loss_coef * value_loss - self.entropy_coef * entropy.mean()
+                entropy_mean = entropy.mean()
+                loss = policy_loss + self.value_loss_coef * value_loss - self.entropy_coef * entropy_mean
 
                 self.optimizer.zero_grad(set_to_none=True)
                 loss.backward()
@@ -60,7 +61,7 @@ class PpoAlgorithm:
 
                 total_pi += float(policy_loss.item())
                 total_v += float(value_loss.item())
-                total_ent += float(entropy.mean().item())
+                total_ent += float(entropy_mean.item())
                 total_kl += float(approx_kl.item())
                 updates += 1
 
