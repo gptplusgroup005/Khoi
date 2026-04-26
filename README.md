@@ -1,6 +1,6 @@
-# RL 2D Map PPO
+# RL 3D Map PPO Viewer
 
-Lightweight reinforcement learning project for training a PPO agent to navigate randomly generated 2D maps with static obstacles.
+Lightweight reinforcement learning project for training a PPO agent to navigate randomly generated obstacle maps with a live 3D-style viewer.
 
 ## Recommended architecture
 
@@ -8,7 +8,7 @@ This repo now follows a simple split that is friendly for both training speed an
 
 - `env_maze.py`: 2D obstacle-map generation, environment stepping, reward logic, episode metrics, trace tracking, and visualization snapshots.
 - `train.py`: PPO training runner that opens a live Tkinter UI by default.
-- `maze_ui.py`: desktop UI for drawing the current map, start, goal, agent, and trace path.
+- `maze_ui.py`: desktop UI for drawing the current map as an interactive 3D-style scene with obstacles, start, goal, agent, and trace path.
 - `test_env.py`: quick evaluation loop with ASCII rendering using the same environment state as the trainer.
 - `agent/`: PPO policy, rollout storage, and optimization code.
 
@@ -19,6 +19,8 @@ Default training with live UI:
 ```bash
 python train.py
 ```
+
+The viewer supports mouse-drag orbit, Shift-drag pan, mouse-wheel zoom, and camera buttons in the sidebar. For smoother training, the UI receives compact sparse visual updates and redraws only the moving layer unless the map or camera changes.
 
 By default the trainer keeps running after it reaches the target success rate. It saves a checkpoint, generates a fresh map, and continues improving the policy. Use `--updates N` if you want a finite run.
 

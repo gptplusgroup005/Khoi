@@ -31,7 +31,7 @@ class TrainConfig:
     checkpoint_path: str = "map_policy.pt"
     metrics_path: str = "runs/train_metrics.jsonl"
     visual_env_index: int = 0
-    visual_log_every: int = 32
+    visual_log_every: int = 64
     target_success_rate: float = 0.90
     bootstrap_steps: int = 8192
     bootstrap_epochs: int = 4
@@ -78,7 +78,7 @@ def parse_args() -> TrainConfig:
     parser.add_argument("--checkpoint-path", type=str, default="map_policy.pt")
     parser.add_argument("--metrics-path", type=str, default="runs/train_metrics.jsonl")
     parser.add_argument("--visual-env-index", type=int, default=0)
-    parser.add_argument("--visual-log-every", type=int, default=32)
+    parser.add_argument("--visual-log-every", type=int, default=64)
     parser.add_argument("--target-success-rate", type=float, default=0.90)
     parser.add_argument("--bootstrap-steps", type=int, default=8192)
     parser.add_argument("--bootstrap-epochs", type=int, default=4)

@@ -35,6 +35,7 @@ class MazeEnv:
         self.episode_return = torch.zeros(num_envs, dtype=torch.float32, device=device)
         self.episode_length = torch.zeros(num_envs, dtype=torch.long, device=device)
         self.episodes_on_maze = torch.zeros(num_envs, dtype=torch.long, device=device)
+        self.map_versions = torch.zeros(num_envs, dtype=torch.long, device=device)
         self.trace_map = torch.zeros((num_envs, size, size), dtype=torch.float32, device=device)
         self.env_indices = torch.arange(num_envs, device=device)
         self.action_deltas = torch.tensor(
@@ -155,6 +156,7 @@ class MazeEnv:
         self.goal_pos[idx] = torch.tensor(goal, dtype=torch.long, device=self.device)
         self.distance_maps[idx] = self._compute_distance_map(navigation_grid, goal)
         self.episodes_on_maze[idx] = 0
+        self.map_versions[idx] += 1
 
     def _reset_episode(self, idx: int, regenerate_maze: bool):
         if regenerate_maze:
@@ -244,24 +246,34 @@ class MazeEnv:
 
         return self._get_obs(), reward, done.float(), info
 
-    def get_visual_state(self, env_index: int = 0) -> Dict[str, object]:
-        grid = self.grids[env_index].detach().to("cpu")
+    def get_visual_state(self, env_index: int = 0, dense: bool = False) -> Dict[str, object]:
+        grid_device = self.grids[env_index].detach()
+        trace_device = self.trace_map[env_index].detach()
         agent = self.agent_pos[env_index].detach().to("cpu")
         start = self.start_pos[env_index].detach().to("cpu")
         goal = self.goal_pos[env_index].detach().to("cpu")
-        trace = self.trace_map[env_index].detach().to("cpu")
-        distance = self.distance_maps[env_index].detach().to("cpu")
         start_x, start_y = start.tolist()
+        blocked_x, blocked_y = torch.where(~grid_device)
+        trace_x, trace_y = torch.where(trace_device > 0)
+        trace_values = trace_device[trace_x, trace_y]
 
-        return {
+        state = {
             "env_index": env_index,
             "size": self.size,
-            "grid": grid.int().tolist(),
             "agent": agent.tolist(),
             "start": start.tolist(),
             "goal": goal.tolist(),
-            "trace": trace.tolist(),
-            "shortest_path_length": int(distance[start_x, start_y].item()),
+            "map_version": int(self.map_versions[env_index].item()),
+            "obstacle_cells": list(zip(blocked_x.to("cpu").tolist(), blocked_y.to("cpu").tolist())),
+            "trace_cells": [
+                (int(row), int(col), float(visits))
+                for row, col, visits in zip(
+                    trace_x.to("cpu").tolist(),
+                    trace_y.to("cpu").tolist(),
+                    trace_values.to("cpu").tolist(),
+                )
+            ],
+            "shortest_path_length": int(self.distance_maps[env_index, start_x, start_y].item()),
             "step_count": int(self.step_count[env_index].item()),
             "episode_return": float(self.episode_return[env_index].item()),
             "episode_length": int(self.episode_length[env_index].item()),
@@ -269,9 +281,13 @@ class MazeEnv:
             "episodes_on_map": int(self.episodes_on_maze[env_index].item()),
             "robot_radius_cells": self.robot_radius_cells,
         }
+        if dense:
+            state["grid"] = grid_device.to("cpu").int().tolist()
+            state["trace"] = trace_device.to("cpu").tolist()
+        return state
 
     def render_ascii(self, env_index: int = 0) -> str:
-        state = self.get_visual_state(env_index=env_index)
+        state = self.get_visual_state(env_index=env_index, dense=True)
         grid: List[List[int]] = state["grid"]
         trace: List[List[float]] = state["trace"]
         agent_x, agent_y = state["agent"]
